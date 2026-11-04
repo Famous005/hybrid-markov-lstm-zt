@@ -1,0 +1,2 @@
+model,accuracy,precision,recall,f1_score,macro_f1,auc_roc,mean_fpr,latency_ms
+Markov Chain,0.9313,0.942,0.9313,0.9341,0.431,0.7105,0.2275,0.1545

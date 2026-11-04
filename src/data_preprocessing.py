@@ -1,9 +1,6 @@
 """
 data_preprocessing.py
 ----------------------
-Implements the full preprocessing pipeline described in thesis Chapter 3
-and Chapter 4 (Sections 3.4, 4.3.1, 4.3.2).
-
 Pipeline stages (matches Table 4.4 - Feature reduction across stages):
   Stage 1: Raw dataset          - 57 features
   Stage 2: Drop index columns   - 53 features (4 unnamed cols removed)
