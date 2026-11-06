@@ -1,0 +1,2 @@
+model,accuracy,precision,recall,f1_score,macro_f1,auc_roc,mean_fpr,latency_ms
+LSTM,0.897,0.868,0.881,0.874,0.869,0.932,0.044,4.87

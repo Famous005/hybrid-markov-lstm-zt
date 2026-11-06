@@ -1,0 +1,2 @@
+model,accuracy,precision,recall,f1_score,macro_f1,auc_roc,mean_fpr,latency_ms,alpha
+Hybrid Markov-LSTM,0.934,0.912,0.928,0.92,0.917,0.963,0.022,5.02,0.35

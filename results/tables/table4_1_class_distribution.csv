@@ -1,0 +1,5 @@
+class,label,count,percentage
+Normal,0,5800,96.4
+Suspicious,1,150,2.5
+Malicious,2,66,1.1
+Total,,6016,100.0

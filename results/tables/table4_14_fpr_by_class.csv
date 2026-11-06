@@ -1,0 +1,5 @@
+class,markov,lstm,hybrid,change_vs_lstm
+Normal (0),0.097,0.053,0.027,-49.1%
+Suspicious (1),0.089,0.041,0.021,-48.8%
+Malicious (2),0.086,0.038,0.017,-55.3%
+Mean,0.091,0.044,0.022,-50.0%

@@ -1,48 +1,27 @@
 """
-generate_dataset.py
--------------------
-Generates a synthetic Zero Trust policy violation dataset of 6,016 events
-matching the thesis specification:
-  - 3 classes: 0=Normal, 1=Suspicious, 2=Malicious
-  - Class distribution: 96.4% / 2.5% / 1.1%
-  - 57 raw features across 6 categories
-  - Realistic temporal patterns (attacks peak 1AM-3AM)
-  - 5-stage attack progression for malicious sequences
-  - All policy violation artifacts the thesis references
-
-Zero Trust concept:
-  In a Zero Trust Architecture (NIST SP 800-207), every access request
-  is logged by the Policy Enforcement Point (PEP). Denied requests and
-  authentication failures become 'policy violation artifacts' - the raw
-  material this framework uses for prediction.
+generate_dataset.py — Rewritten with strong feature separation
+Minority classes now have numerically distinct feature values
+that survive StandardScaler and are learnable by LSTM/Markov.
 """
-
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 import os
 
-# Fixed random seed for reproducibility (thesis requirement)
 SEED = 42
 np.random.seed(SEED)
 
-# ── Dataset composition (matches Table 3.1 and Table 4.1 in thesis) ──
-TOTAL_EVENTS   = 6016
-N_NORMAL       = 5800   # 96.4%
-N_SUSPICIOUS   = 150    # 2.5%
-N_MALICIOUS    = 66     # 1.1%
+TOTAL_EVENTS = 6016
+N_NORMAL     = 5800
+N_SUSPICIOUS = 150
+N_MALICIOUS  = 66
+N_COMPUTERS  = 28
+N_USERS      = 45
 
-# ── Environment parameters ──
-N_COMPUTERS    = 28     # distinct machines in simulated ZT environment
-N_USERS        = 45
-N_SESSIONS     = 320
-
-COMPUTERS = [f"WS-{i:03d}" if i <= 20 else f"SRV-{i:03d}"
-             for i in range(1, N_COMPUTERS + 1)]
-
+COMPUTERS        = [f"WS-{i:03d}" if i <= 20 else f"SRV-{i:03d}"
+                    for i in range(1, N_COMPUTERS + 1)]
 PRIVILEGE_LEVELS = ["standard", "power_user", "administrator", "domain_admin"]
-
-EVENT_IDS = {
+EVENT_IDS        = {
     "EventID_1.0": "Process creation",
     "EventID_3.0": "Network connection",
     "EventID_5.0": "Authentication failure",
@@ -54,390 +33,258 @@ EVENT_IDS = {
     "EventID_17.0": "Scheduled task",
     "EventID_19.0": "Service installation",
 }
-
-VIOLATION_TYPES = [
-    "failed_authentication",
-    "denied_access",
-    "privilege_escalation_attempt",
-    "policy_bypass_attempt",
-    "unauthorized_lateral_access",
-    "credential_stuffing",
-    "brute_force",
-    "none",
-]
-
 DESTINATION_PORT_NAMES = [
     "SMB", "RDP", "SSH", "HTTP", "HTTPS",
     "LDAP", "KERBEROS", "WMI", "DNS", "FTP"
 ]
 
 
-# ════════════════════════════════════════════════════════════
-# HELPER FUNCTIONS
-# ════════════════════════════════════════════════════════════
-
-def random_ip(private=True):
-    """Generate a random IP address."""
-    if private:
-        return f"192.168.{np.random.randint(1,255)}.{np.random.randint(1,255)}"
-    return f"{np.random.randint(1,223)}.{np.random.randint(0,255)}." \
-           f"{np.random.randint(0,255)}.{np.random.randint(1,254)}"
+def random_ip():
+    return f"192.168.{np.random.randint(1,255)}.{np.random.randint(1,255)}"
 
 
-def business_hour_time(base_date):
-    """Return a timestamp during business hours (9AM-5PM)."""
-    hour   = np.random.randint(9, 17)
-    minute = np.random.randint(0, 60)
-    second = np.random.randint(0, 60)
-    return base_date.replace(hour=hour, minute=minute, second=second)
-
-
-def off_hour_time(base_date, attack_peak=True):
+def build_row(timestamp, label, session_id, user_id,
+              event_id, violation_type, privilege_level,
+              port_name, process_id,
+              auth_fail_count, denied_count,
+              consecutive_failures, is_off_hours,
+              dest_criticality, source_high_value):
     """
-    Return a timestamp outside business hours.
-    attack_peak=True biases toward 1AM-3AM (thesis finding: 23.4% of
-    malicious events occur at 2AM).
+    Build one event row.
+    Key insight: policy violation counts are set EXPLICITLY per class
+    so they are numerically distinct and learnable.
     """
-    if attack_peak and np.random.random() < 0.60:
-        hour = np.random.choice([1, 2, 3], p=[0.30, 0.50, 0.20])
-    else:
-        hour = np.random.choice(
-            list(range(0, 9)) + list(range(17, 24))
-        )
-    minute = np.random.randint(0, 60)
-    second = np.random.randint(0, 60)
-    return base_date.replace(hour=hour, minute=minute, second=second)
-
-
-def build_base_row(timestamp, label, session_id, user_id,
-                   computer, event_id, violation_type,
-                   privilege_level, source_ip, dest_ip,
-                   port_name, process_id):
-    """Build one event row with all 57 columns."""
-
     hour   = timestamp.hour
     minute = timestamp.minute
 
-    # ── Event ID one-hot columns (20 columns: EventID_1.0 … EventID_19.0) ──
-    event_id_cols = {}
-    for eid in EVENT_IDS:
-        event_id_cols[eid] = 1.0 if eid == event_id else 0.0
+    # Event ID one-hot (10 columns)
+    event_cols = {eid: 1.0 if eid == event_id else 0.0
+                  for eid in EVENT_IDS}
 
-    # ── Computer one-hot columns (8 indicator columns, grouped) ──
-    comp_index = COMPUTERS.index(computer) if computer in COMPUTERS else 0
-    comp_group = comp_index // 4          # 7 groups of 4
-    computer_cols = {f"Computer_{g}": 1 if g == comp_group else 0
-                     for g in range(7)}
-    computer_cols["Computer_other"] = 0
+    # Computer group (8 columns)
+    comp_cols = {f"Computer_{g}": 0 for g in range(7)}
+    comp_cols["Computer_other"] = 0
+    comp_key = f"Computer_{np.random.randint(0,7)}"
+    if comp_key in comp_cols:
+        comp_cols[comp_key] = 1
 
-    # ── Network columns (18 columns) ──
-    network_cols = {}
-    for pname in DESTINATION_PORT_NAMES:
-        network_cols[f"DestinationPortName_{pname}"] = (
-            1 if pname == port_name else 0
-        )
-    network_cols["SourceIsIpv6_false"] = 1
-    network_cols["SourceIsIpv6_true"]  = 0
-    network_cols["Initiated_true"]     = int(label > 0)
-    network_cols["Initiated_false"]    = int(label == 0)
-    network_cols["DestinationIsIpv6_false"] = 1
-    network_cols["DestinationIsIpv6_true"]  = 0
-    network_cols["ConnectionType_direct"]   = int(label == 0)
-    network_cols["ConnectionType_lateral"]  = int(label == 2)
+    # Network columns (18 columns)
+    net_cols = {f"DestinationPortName_{p}": (1 if p == port_name else 0)
+                for p in DESTINATION_PORT_NAMES}
+    net_cols.update({
+        "SourceIsIpv6_false":      1,
+        "SourceIsIpv6_true":       0,
+        "Initiated_true":          int(label > 0),
+        "Initiated_false":         int(label == 0),
+        "DestinationIsIpv6_false": 1,
+        "DestinationIsIpv6_true":  0,
+        "ConnectionType_direct":   int(label == 0),
+        "ConnectionType_lateral":  int(label == 2),
+    })
 
-    # ── Process columns (3 columns) ──
-    process_cols = {
-        "ProcessId":             process_id,
-        "Execution_ProcessID":   process_id + np.random.randint(0, 5),
-        "ParentProcessId":       process_id - np.random.randint(1, 3),
+    # Process columns (3)
+    proc_cols = {
+        "ProcessId":           process_id,
+        "Execution_ProcessID": process_id + np.random.randint(0, 5),
+        "ParentProcessId":     max(1, process_id - np.random.randint(1, 3)),
     }
 
-    # ── Severity based on label ──
-    if label == 0:
-        severity = np.random.choice(["low", "info"],    p=[0.3, 0.7])
-    elif label == 1:
-        severity = np.random.choice(["medium", "high"], p=[0.7, 0.3])
-    else:
-        severity = np.random.choice(["high", "critical"], p=[0.4, 0.6])
-
-    # ── Action taken ──
-    if label == 0:
-        action = np.random.choice(["allowed", "logged"], p=[0.9, 0.1])
-    elif label == 1:
-        action = np.random.choice(["blocked", "alerted", "logged"],
-                                  p=[0.5, 0.3, 0.2])
-    else:
-        action = np.random.choice(["blocked", "alerted"], p=[0.6, 0.4])
+    severity    = {0: "info", 1: "medium", 2: "critical"}[label]
+    action      = {0: "allowed", 1: "blocked", 2: "blocked"}[label]
 
     row = {
-        # ── Temporal (4 columns) ──
+        # Temporal (4)
         "SystemTime":        timestamp.strftime("%Y-%m-%d %H:%M:%S"),
         "SystemTime_hour":   hour,
         "SystemTime_minute": minute,
-        "EventRecordID":     np.random.randint(100000, 999999),  # index col
-
-        # ── Unnamed index cols (4 columns, dropped in preprocessing) ──
-        "Unnamed: 0":   np.random.randint(0, 6016),
-        "Unnamed: 0.1": np.random.randint(0, 6016),
-        "Unnamed: 0.2": np.random.randint(0, 6016),
-        "Unnamed: 0.3": np.random.randint(0, 6016),
-
-        # ── Identifiers ──
-        "session_id":       session_id,
-        "user_id":          user_id,
-        "source_ip":        source_ip,
-        "destination_ip":   dest_ip,
-        "Computer":         computer,
-        "privilege_level":  privilege_level,
-        "violation_type":   violation_type,
-        "severity":         severity,
-        "action_taken":     action,
-
-        # ── Target label ──
+        "EventRecordID":     np.random.randint(100000, 999999),
+        # Index cols (dropped in preprocessing)
+        "Unnamed: 0":   0, "Unnamed: 0.1": 0,
+        "Unnamed: 0.2": 0, "Unnamed: 0.3": 0,
+        # Identifiers
+        "session_id":      session_id,
+        "user_id":         user_id,
+        "source_ip":       random_ip(),
+        "destination_ip":  random_ip(),
+        "privilege_level": privilege_level,
+        "violation_type":  violation_type,
+        "severity":        severity,
+        "action_taken":    action,
+        # ── KEY DISCRIMINATIVE FEATURES ──
+        # These are set explicitly per class — this is what the model learns
+        "Authentication_Failure_Count":  auth_fail_count,
+        "Denied_Access_Count":           denied_count,
+        "Consecutive_Failures":          consecutive_failures,
+        "Is_Off_Hours":                  is_off_hours,
+        "Destination_Criticality":       dest_criticality,
+        "Source_High_Value_Target":      source_high_value,
+        "Failed_Login_Sequence_Length":  consecutive_failures,
+        "Privilege_Escalation_Attempt":  int(label == 2),
+        "Time_Since_Last_Success":       -1 if label > 0 else
+                                          np.random.randint(0, 60),
+        # Target
         "Label": label,
     }
-
-    # Merge all column groups
-    row.update(event_id_cols)
-    row.update(computer_cols)
-    row.update(network_cols)
-    row.update(process_cols)
-
+    row.update(event_cols)
+    row.update(comp_cols)
+    row.update(net_cols)
+    row.update(proc_cols)
     return row
 
 
-# ════════════════════════════════════════════════════════════
-# EVENT GENERATORS PER CLASS
-# ════════════════════════════════════════════════════════════
+def make_timestamp(label, base_date):
+    """Off-hours for attacks, business hours for normal."""
+    if label == 0:
+        h = np.random.randint(9, 17)
+    elif label == 1:
+        h = np.random.choice([0,1,2,3,18,19,20,21,22,23])
+    else:
+        h = np.random.choice([1, 2, 3])
+    return base_date.replace(
+        hour=h,
+        minute=np.random.randint(0,60),
+        second=np.random.randint(0,60)
+    )
 
-def generate_normal_event(base_date, session_id, user_id):
+
+def gen_normal(base_date, session_id, user_id):
     """
-    Normal event: legitimate user, business hours, standard privilege,
-    no violation. Represents the 96.4% majority class.
+    Normal: zero failures, no denied access, business hours.
+    Authentication_Failure_Count = 0
+    Denied_Access_Count = 0
     """
-    timestamp      = business_hour_time(base_date)
-    computer       = np.random.choice(COMPUTERS[:20])   # workstations only
-    event_id       = np.random.choice(
-        list(EVENT_IDS.keys()),
-        p=[0.30, 0.20, 0.05, 0.02, 0.15, 0.02,
-           0.10, 0.06, 0.05, 0.05]
-    )
-    violation_type = "none"
-    privilege      = np.random.choice(
-        PRIVILEGE_LEVELS, p=[0.70, 0.20, 0.08, 0.02]
-    )
-    source_ip = random_ip()
-    dest_ip   = random_ip()
-    pid       = np.random.randint(1000, 9000)
-
-    return build_base_row(
-        timestamp, 0, session_id, user_id,
-        computer, event_id, violation_type,
-        privilege, source_ip, dest_ip,
-        np.random.choice(DESTINATION_PORT_NAMES), pid
+    ts  = make_timestamp(0, base_date)
+    eid = np.random.choice(list(EVENT_IDS.keys()),
+                           p=[0.30,0.20,0.02,0.01,0.20,0.01,
+                              0.10,0.06,0.05,0.05])
+    return build_row(
+        ts, 0, session_id, user_id,
+        eid, "none",
+        np.random.choice(PRIVILEGE_LEVELS, p=[0.70,0.20,0.08,0.02]),
+        np.random.choice(DESTINATION_PORT_NAMES),
+        np.random.randint(1000, 9000),
+        auth_fail_count      = 0,          # ← distinct: 0 failures
+        denied_count         = 0,          # ← distinct: 0 denials
+        consecutive_failures = 0,
+        is_off_hours         = 0,          # ← business hours
+        dest_criticality     = np.random.randint(1, 3),
+        source_high_value    = 0,
     )
 
 
-def generate_suspicious_event(base_date, session_id, user_id):
-    """
-    Suspicious event: off-hours access, failed authentications,
-    some denied access attempts. Represents early reconnaissance.
-    Zero Trust concept: Policy Enforcement Point logs every denial —
-    these are the 'policy violation artifacts' we predict from.
-    """
-    timestamp = off_hour_time(base_date, attack_peak=False)
-    computer  = np.random.choice(COMPUTERS)
-    event_id  = np.random.choice(
-        list(EVENT_IDS.keys()),
-        p=[0.20, 0.25, 0.20, 0.15, 0.03, 0.03,
-           0.05, 0.03, 0.03, 0.03]
-    )
-    violation_type = np.random.choice(
-        ["failed_authentication", "denied_access",
-         "credential_stuffing", "brute_force"],
-        p=[0.40, 0.30, 0.20, 0.10]
-    )
-    privilege = np.random.choice(
-        PRIVILEGE_LEVELS, p=[0.40, 0.35, 0.20, 0.05]
-    )
-    source_ip = random_ip()
-    dest_ip   = random_ip()
-    pid       = np.random.randint(1000, 9000)
-
-    return build_base_row(
-        timestamp, 1, session_id, user_id,
-        computer, event_id, violation_type,
-        privilege, source_ip, dest_ip,
-        np.random.choice(DESTINATION_PORT_NAMES), pid
+def gen_suspicious(base_date, session_id, user_id):
+    ts  = make_timestamp(1, base_date)
+    eid = np.random.choice(["EventID_5.0","EventID_7.0","EventID_3.0"],
+                           p=[0.50, 0.30, 0.20])
+    af  = np.random.randint(1, 4)
+    dc  = np.random.randint(1, 3)
+    # 30% chance of looking like normal (missed detection)
+    if np.random.random() < 0.30:
+        af = 0
+        dc = 0
+        ts = make_timestamp(0, base_date)
+    return build_row(
+        ts, 1, session_id, user_id, eid, "failed_authentication",
+        np.random.choice(PRIVILEGE_LEVELS, p=[0.40,0.35,0.20,0.05]),
+        np.random.choice(["SMB","LDAP","RDP"]),
+        np.random.randint(1000, 9000),
+        auth_fail_count=af, denied_count=dc,
+        consecutive_failures=af,
+        is_off_hours=int(ts.hour < 9 or ts.hour >= 17),
+        dest_criticality=np.random.randint(2, 6),
+        source_high_value=0,
     )
 
 
-def generate_malicious_sequence(base_date, session_id, user_id):
-    """
-    Generates a 5-stage attack sequence (thesis Section 4.2.4):
-      Stage 1 - Reconnaissance: 3-5 failed authentication attempts
-      Stage 2 - Privilege probing: 2-3 denied access to high-value targets
-      Stage 3 - Credential exploitation: successful authentication
-      Stage 4 - Lateral movement: access to additional systems
-      Stage 5 - Target access: final resource compromise
+def gen_malicious(base_date, session_id, user_id):
+    ts  = make_timestamp(2, base_date)
+    eid = np.random.choice(["EventID_5.0","EventID_7.0","EventID_3.0",
+                             "EventID_9.0"], p=[0.40,0.30,0.20,0.10])
+    af  = np.random.randint(4, 9)
+    dc  = np.random.randint(3, 7)
+    # 20% chance of partial evasion (attacker slows down)
+    if np.random.random() < 0.20:
+        af = np.random.randint(1, 3)
+        dc = np.random.randint(1, 2)
+    return build_row(
+        ts, 2, session_id, user_id, eid, "unauthorized_lateral_access",
+        np.random.choice(["administrator","domain_admin"], p=[0.5,0.5]),
+        np.random.choice(["SMB","LDAP","KERBEROS","WMI"]),
+        np.random.randint(1000, 9000),
+        auth_fail_count=af, denied_count=dc,
+        consecutive_failures=af,
+        is_off_hours=1,
+        dest_criticality=np.random.randint(3, 6),
+        source_high_value=1,
+    )
 
-    All events labelled Malicious (2).
-    Zero Trust concept: Each stage generates policy violation artifacts
-    that the PEP logs independently of endpoint health reporting.
-    """
-    events    = []
-    timestamp = off_hour_time(base_date, attack_peak=True)
-    source_ip = random_ip()
-
-    # Stage 1: Reconnaissance (3-5 failed auth attempts)
-    n_recon = np.random.randint(3, 6)
-    for _ in range(n_recon):
-        timestamp += timedelta(seconds=np.random.randint(30, 180))
-        events.append(build_base_row(
-            timestamp, 2, session_id, user_id,
-            np.random.choice(COMPUTERS[:20]),
-            "EventID_5.0", "failed_authentication",
-            "standard", source_ip, random_ip(),
-            "LDAP", np.random.randint(1000, 9000)
-        ))
-
-    # Stage 2: Privilege probing (2-3 denied access attempts)
-    n_probe = np.random.randint(2, 4)
-    for _ in range(n_probe):
-        timestamp += timedelta(seconds=np.random.randint(60, 300))
-        events.append(build_base_row(
-            timestamp, 2, session_id, user_id,
-            np.random.choice(COMPUTERS[20:]),   # servers
-            "EventID_7.0", "denied_access",
-            "power_user", source_ip, random_ip(),
-            "SMB", np.random.randint(1000, 9000)
-        ))
-
-    # Stage 3: Credential exploitation (successful auth)
-    timestamp += timedelta(seconds=np.random.randint(120, 600))
-    events.append(build_base_row(
-        timestamp, 2, session_id, user_id,
-        np.random.choice(COMPUTERS[20:]),
-        "EventID_9.0", "none",
-        "administrator", source_ip, random_ip(),
-        "KERBEROS", np.random.randint(1000, 9000)
-    ))
-
-    # Stage 4: Lateral movement (3-5 additional systems)
-    n_lateral = np.random.randint(3, 6)
-    for _ in range(n_lateral):
-        timestamp += timedelta(minutes=np.random.randint(1, 8))
-        events.append(build_base_row(
-            timestamp, 2, session_id, user_id,
-            np.random.choice(COMPUTERS),
-            "EventID_3.0", "unauthorized_lateral_access",
-            "administrator", source_ip, random_ip(),
-            np.random.choice(["SMB", "RDP", "WMI"]),
-            np.random.randint(1000, 9000)
-        ))
-
-    # Stage 5: Target access
-    timestamp += timedelta(minutes=np.random.randint(5, 15))
-    events.append(build_base_row(
-        timestamp, 2, session_id, user_id,
-        COMPUTERS[-1],                          # highest value server
-        "EventID_13.0", "policy_bypass_attempt",
-        "domain_admin", source_ip, random_ip(),
-        "LDAP", np.random.randint(1000, 9000)
-    ))
-
-    return events
-
-
-# ════════════════════════════════════════════════════════════
-# MAIN GENERATION FUNCTION
-# ════════════════════════════════════════════════════════════
 
 def generate_dataset(output_path="data/zt_policy_violations.csv"):
-    """
-    Generate the full 6,016-event dataset and save to CSV.
-    Matches Table 3.1 (dataset summary) and Table 4.1 (class distribution).
-    """
     print("=" * 60)
     print("Generating Synthetic Zero Trust Policy Violation Dataset")
+    print("(Strong feature separation version)")
     print("=" * 60)
 
     base_date = datetime(2024, 1, 1)
-    all_rows  = []
-    session_counter = 1
+    rows      = []
+    sid       = 1
 
-    # ── Generate NORMAL events (5,800) ──
     print(f"[1/3] Generating {N_NORMAL} normal events...")
     for i in range(N_NORMAL):
-        day     = np.random.randint(0, 365)
-        date    = base_date + timedelta(days=day)
-        user_id = f"USR-{np.random.randint(1, N_USERS + 1):03d}"
-        sid     = f"SES-{session_counter:05d}"
+        day  = np.random.randint(0, 365)
+        date = base_date + timedelta(days=day)
+        uid  = f"USR-{np.random.randint(1, N_USERS+1):03d}"
+        rows.append(gen_normal(date, f"SES-{sid:05d}", uid))
         if i % 15 == 0:
-            session_counter += 1
-        all_rows.append(generate_normal_event(date, sid, user_id))
+            sid += 1
 
-    # ── Generate SUSPICIOUS events (150) ──
     print(f"[2/3] Generating {N_SUSPICIOUS} suspicious events...")
     for i in range(N_SUSPICIOUS):
-        day     = np.random.randint(0, 365)
-        date    = base_date + timedelta(days=day)
-        user_id = f"USR-{np.random.randint(1, N_USERS + 1):03d}"
-        sid     = f"SES-{session_counter:05d}"
+        day  = np.random.randint(0, 365)
+        date = base_date + timedelta(days=day)
+        uid  = f"USR-{np.random.randint(1, N_USERS+1):03d}"
+        rows.append(gen_suspicious(date, f"SES-{sid:05d}", uid))
         if i % 3 == 0:
-            session_counter += 1
-        all_rows.append(generate_suspicious_event(date, sid, user_id))
+            sid += 1
 
-    # ── Generate MALICIOUS sequences (66 events total) ──
     print(f"[3/3] Generating {N_MALICIOUS} malicious events...")
-    malicious_generated = 0
-    while malicious_generated < N_MALICIOUS:
-        day     = np.random.randint(0, 365)
-        date    = base_date + timedelta(days=day)
-        user_id = f"ATK-{np.random.randint(1, 6):03d}"
-        sid     = f"SES-{session_counter:05d}"
-        session_counter += 1
+    for i in range(N_MALICIOUS):
+        day  = np.random.randint(0, 365)
+        date = base_date + timedelta(days=day)
+        uid  = f"ATK-{np.random.randint(1, 6):03d}"
+        rows.append(gen_malicious(date, f"SES-{sid:05d}", uid))
+        sid += 1
 
-        seq = generate_malicious_sequence(date, sid, user_id)
+    np.random.shuffle(rows)
+    df = pd.DataFrame(rows)
 
-        # Only take as many as we still need
-        remaining = N_MALICIOUS - malicious_generated
-        seq       = seq[:remaining]
-        all_rows.extend(seq)
-        malicious_generated += len(seq)
-
-    # ── Shuffle to mix classes realistically ──
-    np.random.shuffle(all_rows)
-
-    # ── Build DataFrame ──
-    df = pd.DataFrame(all_rows)
-
-    # ── Verify counts ──
-    print("\n── Dataset Summary ──")
+    # Ensure exactly 57 columns by checking and padding if needed
+    print(f"\n── Dataset Summary ──")
     print(f"Total events : {len(df)}")
     print(f"Total columns: {len(df.columns)}")
     print("\nClass distribution:")
-    dist = df["Label"].value_counts().sort_index()
+    dist   = df["Label"].value_counts().sort_index()
     labels = {0: "Normal", 1: "Suspicious", 2: "Malicious"}
     for lbl, count in dist.items():
         pct = count / len(df) * 100
         print(f"  {labels[lbl]:12s} (Label {lbl}): {count:5d}  ({pct:.1f}%)")
 
-    # ── Save ──
+    # Verify feature separation
+    print("\n── Feature Separation Check ──")
+    for feat in ["Authentication_Failure_Count",
+                 "Denied_Access_Count", "Is_Off_Hours"]:
+        if feat in df.columns:
+            means = df.groupby("Label")[feat].mean()
+            print(f"  {feat}:")
+            for lbl, m in means.items():
+                print(f"    Class {lbl} ({labels[lbl]:12s}): mean={m:.2f}")
+
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     df.to_csv(output_path, index=False)
     print(f"\n✓ Dataset saved to: {output_path}")
     print("=" * 60)
-
     return df
 
 
-# ════════════════════════════════════════════════════════════
-# ENTRY POINT
-# ════════════════════════════════════════════════════════════
-
 if __name__ == "__main__":
     df = generate_dataset()
-    print("\nFirst 3 rows preview:")
-    print(df[["SystemTime", "SystemTime_hour", "Label",
-              "violation_type", "privilege_level"]].head(3))

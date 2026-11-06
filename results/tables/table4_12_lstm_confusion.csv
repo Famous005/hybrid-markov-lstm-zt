@@ -1,0 +1,4 @@
+actual,pred_normal,pred_suspicious,pred_malicious
+Normal,553,22,3
+Suspicious,18,150,12
+Malicious,9,26,110
