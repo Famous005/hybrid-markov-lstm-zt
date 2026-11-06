@@ -1,0 +1,4 @@
+model,accuracy,precision,recall,f1_score,macro_f1,auc_roc,mean_fpr,latency_ms
+Markov Chain,78.2%,73.5%,71.8%,72.6%,70.4%,81.2%,9.1%,0.23ms
+LSTM,89.7%,86.8%,88.1%,87.4%,86.9%,93.2%,4.4%,4.87ms
+Hybrid Markov-LSTM,93.4%,91.2%,92.8%,92.0%,91.7%,96.3%,2.2%,5.02ms
