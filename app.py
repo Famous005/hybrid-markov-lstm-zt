@@ -76,17 +76,20 @@ with st.sidebar:
              width=80)
     st.markdown("### Framework Info")
     st.info("""
+    **How to use:**
+    1. Upload your CSV dataset
+    2. View EDA and class distribution
+    3. See model evaluation results
+    4. Download result tables
+
     **Models:**
-    - Markov Chain (interpretable)
-    - LSTM (temporal patterns)
-    - Hybrid Ensemble (best performance)
+    - 🔵 Markov Chain (78.2%)
+    - 🟠 LSTM (89.7%)
+    - 🟢 Hybrid Ensemble (93.4%)
 
-    **Dataset:** Zero Trust Policy
-    Violation Artifacts
-
-    **Task:** 3-class classification
-    - 0: Normal
-    - 1: Suspicious
+    **Task:** 3-class detection
+    - 0: Normal traffic
+    - 1: Suspicious activity
     - 2: Malicious (Lateral Movement)
     """)
     st.markdown("---")
@@ -286,6 +289,22 @@ if df_raw is not None:
 
 st.markdown('<div class="section-header">🤖 Step 3: Model Evaluation Results</div>',
             unsafe_allow_html=True)
+
+if df_raw is None:
+    st.info("""
+    📂 **Upload a dataset in Step 1 to view model evaluation results.**
+
+    The framework will display:
+    - Comparative performance table (Accuracy, Precision, Recall, F1, AUC-ROC)
+    - Confusion matrices for all 3 models
+    - ROC curves and False Positive Rate analysis
+    - Alpha weight tuning curve
+    - Downloadable result tables
+
+    **Supported format**: CSV file with a `Label` column
+    (0 = Normal, 1 = Suspicious, 2 = Malicious)
+    """)
+    st.stop()
 
 results, cm_m, cm_l, cm_h, fpr_df, f1cls = load_precomputed()
 
