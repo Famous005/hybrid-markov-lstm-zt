@@ -185,7 +185,7 @@ uploaded = st.file_uploader(
 )
 
 use_sample = st.checkbox(
-    "Use built-in dataset (6,016 events — thesis dataset)",
+    "Use built-in dataset (6,016 events)",
     value=(uploaded is None)
 )
 
